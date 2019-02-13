@@ -1,0 +1,376 @@
+---
+title: "Marketing Analytics"
+author: "Palash Jain"
+date: "2/9/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,cache=TRUE,warning=FALSE,message=FALSE)
+library(readxl)
+library(plyr)
+library(dplyr)
+library(factoextra)
+library(ggplot2)
+library(knitr)
+library(gridExtra)
+library(ggthemes)
+library(kableExtra)
+library(arules)
+library(arulesViz)
+library(RColorBrewer)
+```
+
+# Executive Summary
+
+This report contains the business analytics performed on the sales data from 2013-01-02 to 2018-10-31. Three separate analysis were performed in order to understand various facets of the sales data. These were:
+
+- Market Segmentation - This was performed in order to gain a better understanding of the customers. The segmentation is based on the infamous RFM (Recency, Frequency, Monetary Value) model and helps us to identify and target customer segments with appropriate products and marketing campaigns.
+
+- Customer Churn analysis - Modelling customer churn in a non-contractual setting such as retail is a difficult problem as every transaction could a customer's last transaction. Here, an anomaly detection method is used to label customers spending pattern as normal or anamolous. This helps us identify customers who are most likely to churn and take actions to retain them.
+
+- Market Basket Analysis - This analysis is based on a theory that if you buy a certain set of items, you are more or less likely to buy another set of items. Knowledge of such rules can really help drive the revenue up. Here the apriori algorithm is used to extract such rules from the sales data.
+
+
+# The Dataset
+
+The dataset consists of 234,086 rows of sales data with 37 columns. Each row contains details about the purchase of an item by a customer. The starting date of this data is 2013-01-02 while the last date is 2018-10-31.
+
+```{r loading the data}
+rawdata<-read_xlsx('to analyze.xlsx')
+names(rawdata)
+```
+
+<P style="page-break-before: always">
+
+# Market Segmentation
+
+Market segmentation allows us to group customers into segments based on purchasing behaviour, demographics amongst other things. This allows us to ensure that appropriate marketing campaigns are targeted to the relevant segment of customers. Market segmentation also helps us in identifying our best customers.
+
+The first step in RFM based market segmentation is to generate an event log of transactions. This basically contains 3 columns of data: a customer ID, date of transaction and the total amount spent in that transaction (Table 1.). From the event log, a RFM matrix is generated (Table 2.) with the following definitions.
+
+- Recency - The number of days passed between a customer's last transaction and the end of the period under observation (in this case '2018-11-01')
+
+- Frequency - The number of transactions (invoices) the customer has had in the sales period under observation.
+
+- Monetary Value - The average money (in euros) spent by a customer per transaction during the sales period under observation.
+
+
+ 
+```{R Table 1}
+data<-rawdata[,c(1,5,9,35)]
+names(data)<-c('invoice_code','cust_id','date','amount')
+data <- data[data$amount > 0 ,]
+data$date <- as.Date(as.character(data$date,'%Y-%m-%d'))
+data<-data%>%
+  group_by(cust_id,invoice_code,date)%>%
+  summarise(amount=sum(amount))%>%
+  ungroup()
+data$Days_since_Purchase <- as.numeric(difftime(time1 = '2018-11-01',time2 = data$date,units = 'days'))
+rfm<-group_by(data,cust_id)%>%
+  summarise(Recency = as.numeric(min(Days_since_Purchase)),
+            Frequency = n(),
+            First_Purchase = as.numeric(max(Days_since_Purchase)),
+            Monetary_Value = round(mean(amount),2))
+kable(head(data)) %>%
+  kable_styling(c('striped','bordered'),font_size = 8)
+```
+ 
+**Table 1. The transactional event log created from the dataset.**
+
+```{R Table 2}
+kable(head(rfm)) %>%
+  kable_styling(c('striped','bordered'),font_size = 8)
+```
+
+**Table 2. The RFM matrix created from the transactional event log.**
+
+Once this matrix is calculated, two different types of market segmentations were used. First is the traditional RFM based market segmentation which scores every customers based on the RFM matrix and then categorizes them into segments based on that score. The second is a managerial segmentation performed on the basis of the absolute values in the RFM matrix. The rules used for each type of segmentation can be found in the appendix section at the end of this report.
+
+```{R Segmentation,fig.width=12}
+# Simple Managerial Segmentation
+rfm_managerial <- rfm
+rfm_managerial$segment <- "NA"
+rfm_managerial$segment[which(rfm_managerial$Recency > 365*3)] = "Inactive"
+rfm_managerial$segment[which(rfm_managerial$Recency <= 365*3 & rfm_managerial$Recency > 365*2)] = "Cold"
+rfm_managerial$segment[which(rfm_managerial$Recency <= 365*2 & rfm_managerial$Recency > 365*1)] = "Warm"
+rfm_managerial$segment[which(rfm_managerial$Recency <= 365)] = "Active"
+rfm_managerial$segment[which(rfm_managerial$segment == "Warm" & rfm_managerial$First_Purchase <= 365*2)] = "New Warm"
+rfm_managerial$segment[which(rfm_managerial$segment == "Warm" & rfm_managerial$Monetary_Value < 500)] = "Warm Low Value"
+rfm_managerial$segment[which(rfm_managerial$segment == "Warm" & rfm_managerial$Monetary_Value >= 500)] = "Warm High Value"
+rfm_managerial$segment[which(rfm_managerial$segment == "Active" & rfm_managerial$First_Purchase <= 365)] = "New Active"
+rfm_managerial$segment[which(rfm_managerial$segment == "Active" & rfm_managerial$Monetary_Value < 500)] = "Active Low Value"
+rfm_managerial$segment[which(rfm_managerial$segment == "Active" & rfm_managerial$Monetary_Value >= 500)] = "Active High value"
+
+
+segments_managerial<-group_by(rfm_managerial,segment)
+segments_managerial<-summarise(segments_managerial,Customer_Count=n())
+
+# RFM Matrix Clustering
+rfm2<-rfm
+
+rfm<-rfm[!rfm$Recency > 365*3,]
+
+rfm$r_score <- as.numeric(as.character(cut(rfm$Recency,
+                   breaks=quantile(rfm$Recency, probs=seq(0,1,0.2)),
+                   labels = c(5,4,3,2,1),
+                   include.lowest=TRUE)))
+
+rfm$f_score <- as.numeric(as.character(cut(rfm$Frequency,
+                   quantile(rfm$Frequency, probs=c(0,0.4,0.6,0.8,0.9,1)),
+                   labels = c(1,2,3,4,5),
+                   include.lowest=TRUE)))
+
+rfm$m_score <- as.numeric(as.character(cut(rfm$Monetary_Value,
+                   breaks=quantile(rfm$Monetary_Value, probs=seq(0,1,0.2)),
+                   labels = c(1,2,3,4,5),
+                   include.lowest=TRUE)))
+
+rfm$fm_score <- floor((rfm$m_score + rfm$f_score)/2)
+rfm$rfm_score <- paste0(rfm$r_score,rfm$fm_score)
+
+rfm$rfm_segment <- NA
+rfm$rfm_segment[rfm$First_Purchase < 365] <- 'New Customers'
+rfm$rfm_segment[is.na(rfm$rfm_segment) & grepl('[4-5][4-5]',rfm$rfm_score)] <- 'Champions'
+rfm$rfm_segment[is.na(rfm$rfm_segment) & grepl('[2-5][3-5]',rfm$rfm_score)] <- 'Loyal Customers'
+rfm$rfm_segment[is.na(rfm$rfm_segment) & grepl('[3-5][2-3]',rfm$rfm_score)] <- 'Potential Loyalists'
+rfm$rfm_segment[is.na(rfm$rfm_segment) & grepl('[4-5][0-2]',rfm$rfm_score)] <- 'Recent Customers'
+rfm$rfm_segment[is.na(rfm$rfm_segment) & grepl('[3-4][0-2]',rfm$rfm_score)] <- 'Promising'
+rfm$rfm_segment[is.na(rfm$rfm_segment) & grepl('[2-3][2-3]',rfm$rfm_score)] <- 'Need Attention'
+rfm$rfm_segment[is.na(rfm$rfm_segment) & grepl('[2-3][0-2]',rfm$rfm_score)] <- 'About to Sleep'
+rfm$rfm_segment[is.na(rfm$rfm_segment) & grepl('[0-2][2-3]',rfm$rfm_score)] <- 'At Risk'
+rfm$rfm_segment[is.na(rfm$rfm_segment) & grepl('[0-1][4-5]',rfm$rfm_score)] <- 'Cant Lose them'
+rfm$rfm_segment[is.na(rfm$rfm_segment) & grepl('[0-2][0-2]',rfm$rfm_score)] <- 'Hibernating'
+
+rfm2 <- merge(rfm2,rfm,all.x = T)
+rfm2 <- merge(rfm2,rfm_managerial[,c(1,6)])
+names(rfm2)[12]<-'managerial_segment'
+rfm<- rfm2
+rfm$rfm_segment[is.na(rfm$rfm_segment)]<-'Lost'
+
+rfm_segment <- as.data.frame(table(rfm$rfm_segment))
+names(rfm_segment)<-c('segment','count')
+
+
+p1<-ggplot(data = rfm_segment,aes(x=reorder(segment,count),y=count)) +
+  geom_bar(stat = 'identity',fill='#00BFC4') +
+  theme_stata() +
+  theme(legend.position = 'none',axis.text.y = element_text(angle = 0))  +
+  xlab('') + ylab('Count') +
+  ggtitle('RFM Segmentation') +
+  geom_text(aes(label=count), position=position_dodge(width=0.9), vjust=0.5,hjust=-0.2) + 
+  coord_flip(ylim=c(0,3500))
+
+p2<-ggplot(data = segments_managerial,aes(x=reorder(segment,Customer_Count),y=Customer_Count)) +
+  geom_bar(stat = 'identity',fill='#00BFC4') +
+  theme_stata()+
+  theme(legend.position = 'none',axis.text.y = element_text(angle = 0)) +
+  coord_flip(ylim=c(0,3500)) +
+  xlab('') +
+  ylab('Count') + 
+  ggtitle('Managerial Segmentation') + 
+  geom_text(aes(label=Customer_Count), position=position_dodge(width=0.9), vjust=0.5,hjust=-0.2)
+
+
+grid.arrange(p1,p2,nrow=1,ncol=2)
+```
+**Figure 1. The market distribution according to the two segmentation strategies used.**
+
+As seen in Fig 1. A majority of our customers are lost or inactive. These are customers who have not interacted with us for over 3 years now. There is not much profit to be had in trying to appease these customers via campaigns. Having said that we do have a significant amount of loyal and active customers. These customers can be the most responsive to marketing campaigns and new products. The major cause for concern here are the "Can't lose them" customers, as these were the customers who were both high value and frequent, but we have not heard from them for a while. We need to identify the reason for their lack of interaction with us and win them back. A full breakdown of the segments and relevant strategies is given below.
+
+```{R}
+include_graphics('segment.png')
+```
+  
+```{R}
+kable(table(rfm$managerial_segment,rfm$rfm_segment)) %>%
+  kable_styling(c('striped','bordered'),font_size = 8)
+```
+
+**Table 3. Cross-tabulation of the two segmentation strategies (values represent counts).**
+
+The two types of segmentations mostly agree with each other(Table 3 & appendix).
+  
+<P style="page-break-before: always">
+  
+# Customer Churn Analysis
+
+Churn modelling in non-contractual business is not a classification problem, it is an anomaly detection problem. Anomaly detection is a technique used to identify unusual patterns that do not conform to expected behaviour, called outliers. We want to be able to make claims like “9 times out of 10, Customer X will make his next purchase within Y days”. If Customer X does not make another purchase within Y days, we know that there is only a 1 in 10 chance of this happening, and that this behaviour is anomalous. Using the anomaly threshold obtained from the analysis, our customers' purchasing behaviour can be classified as being normal or anomalous.
+
+To be able to model this accurately the analysis is limited to only those busineses which have had at least 10 transactions with us.
+
+```{R Anomaly Detection,fig.height = 10,fig.width=10}
+data <- rawdata[,c(5,1,9,35)]
+names(data)<-c('cust_id','invoice_code','date','amount')
+
+txns<-data%>%
+  mutate(cust_id = as.factor(cust_id))%>%
+  group_by(cust_id,date)%>%
+  summarise(spend=sum(amount))%>%
+  ungroup()%>%
+  filter(spend > 0 )
+
+time_between <- txns%>%
+  arrange(cust_id,date)%>%
+  group_by(cust_id)%>%
+  mutate(dt = as.numeric(date - lag(date),unit='days'))%>%
+  ungroup()%>%
+  na.omit()
+
+Ntrans <- txns %>% 
+  group_by(cust_id) %>% 
+  summarise(N = n()) %>%
+  filter(N>10)
+
+sample_n_groups = function(tbl, size, replace = FALSE, weight = NULL) {
+  grps = tbl %>% groups %>% lapply(as.character) %>% unlist
+  keep = tbl %>% summarise() %>% ungroup() %>% sample_n(size, replace, weight)
+  tbl %>% right_join(keep, by=grps) %>% group_by_(.dots = grps)
+}
+
+ecdf_df <- time_between%>%
+  group_by(cust_id)%>%
+  arrange(dt)%>%
+  mutate(e_cdf = 1:length(dt)/length(dt))
+
+sample_users <- ecdf_df %>% inner_join(Ntrans) %>% sample_n_groups(20)
+
+
+
+ggplot(data = ecdf_df %>% inner_join(Ntrans) %>% filter(cust_id %in% sample_users$cust_id), aes(dt,e_cdf) ) + 
+  geom_point(size =0.5) +
+  geom_line() + 
+  geom_hline(yintercept = 0.9, color = 'red') + 
+  facet_wrap(~cust_id) +
+  labs(x = 'Time Since Last Purchase (Days)') +
+  theme_stata()
+
+getq <- function(x,a = 0.9){
+  if(a>1|a<0){
+    print('Check your quantile')
+  }
+  X <- sort(x)
+  e_cdf <- 1:length(X) / length(X)
+  aprx = approx(e_cdf, X, xout = c(0.9))
+  return(aprx$y)
+}
+
+percentiles = time_between %>% 
+  inner_join(Ntrans) %>% 
+  filter(N>5) %>% 
+  group_by(cust_id) %>% 
+  summarise(anomaly_threshold= getq(dt)) %>% 
+  arrange(anomaly_threshold)
+```
+
+**Figure 2. The probability of a business purchasing from us plotted agaisnt the number of days passed since their last purchase. The red line marks a 90% probability. The intersection point's X-coordinate tell us the number of days in which that business is expected to make a transaction 9 out of 10 times.**
+
+
+```{R}
+customers <- merge(rfm,percentiles,all.x = T)
+customers$status <- ifelse(customers$Recency < customers$anomaly_threshold,'Normal','Anomalous')
+customers$anomaly_threshold[is.na(customers$anomaly_threshold)] <- 'Not Enough Transactions'
+customers$status[is.na(customers$status)]<-'Not Enough Transactions' 
+customers$status[customers$Recency > 3*365] <- 'Inactive'
+
+
+kable(head(customers[,c(1,2,10,11,12,13,14)]))%>%
+  kable_styling(c('striped','bordered'),font_size = 8)
+```
+
+**Table 4. Customers table with segmentation and anomaly detection incorporated.**
+
+As seen in Table 4, customer '00000-D02' makes a purchase every 63 days (9 out of 10 times). This customer's recency value of 366 means that this customer has not made a purchase in over a year. Our analysis suggests that their is only a 1 in 10 chance of this happening.
+
+<P style="page-break-before: always">
+
+# Market Basket Analysis
+
+Market Basket Analysis is a modeling technique based upon the theory that if you buy a certain set of items, you are more or less likely to buy another set of items. It is an essential technique used to discover association rules that can help increase the revenue of a company. 
+
+```{R,include=F}
+data<-rawdata[rawdata$Qty > 0,c(5,9,23)]
+names(data)<-c('cust_id','date','item')
+data$code <- paste0(data$cust_id,' on ',data$date)
+data$item<-gsub(',','-',data$item)
+dt<-ddply(data,'code',function(x)paste(x$item,collapse = ','))
+baskets<-read.transactions('items.csv',format = 'basket',sep = ',')
+basket_rules<-apriori(baskets,parameter = list(sup = 0.001,conf = 0.5))
+subset.rules <- which(colSums(is.subset(basket_rules,basket_rules)) > 1)
+subset.association.rules. <- basket_rules[-subset.rules]
+rules_full <- DATAFRAME(basket_rules)
+rules<-DATAFRAME(subset.association.rules.)
+```
+
+```{R}
+dt$V1 <- gsub(',',', ',dt$V1)
+names(dt)<- c('transaction','items_bought')
+kable(head(dt,4))%>%
+  kable_styling(c('striped','bordered'),font_size = 8)
+  
+```
+
+**Table 5. The transaction data shows what item were bought together.**
+
+A transaction dataset is generated so that all items that are bought together in one invoice are in one row. Since in our dataset there are multiple invoices generated for the same customer on the same date, I group all items bought by one customer on a single day into one transaction.
+
+
+```{R, fig.align = 'center',fig.width = 10}
+itemFrequencyPlot(baskets,topN = 20,type = 'absolute',cex.names = 0.5,col=brewer.pal(8,'Pastel2'))
+```
+
+**Figure 3. The top 20 most frequently bought items according to our sales data.**
+
+As seen in Fig 3. The most frequently bought item in our sales dataset is "Degraissant N 120 Aerosol 300 mL" with over 8000 purchases. Some other frequently bought items or services are "Diestone DLS 20L P","Analyse - Teneur EN EAU","Socostrip A0103N" and "Frais De Port".
+
+Following this, the apriori algorithm is used to form association rules as described above. The terminology of the results follows the statement :
+
+"If item/service(s) X(s) is/are bought there is a Y % probability that item/service(s) Y(s) will be bought in the same invoice."
+
+- LHS - item/service(s) X(s)
+- RHS - item/service(s) Y(s)
+- Support - How many times does this association occur in the dataset (expressed as a proportion).
+- Confidence - Probability of this rule holding (expressed as a proportion)
+- Lift - How likely item Y is purchased when item X is purchased, while controlling for how popular item Y. 
+- Count - How many times does this association occur in the dataset (expressed as an absolute).
+
+
+```{R}
+kable(head(rules))%>%
+  kable_styling(c('striped','bordered'),font_size = 8)
+
+```
+
+**Table 6. The association rules show which items are frequently bought together.**
+
+As seen in Table 6. If the item/service "Wadis 24- Aerosol 400 mL" is purchased by a customer, there is a 70 % (confidence column) that they will also purchase the item/service "Verification Metalloscope/Aimant Permanent". This combination occurs in approximately 300 transactions in the dataset.
+
+<P style="page-break-before: always">
+
+# Appendix
+
+## Rules for RFM based segmentation
+
+- Champions : Recency score and Frequency + Monetary Value Score in the range [4-5].
+- Loyal Customers : Unsegmented customers with Recency score and Frequency + Monetary Value Score in the range [2-5] & [4-5] respectively.
+- Potential Loyalists : Unsegmented customers with Recency score and Frequency + Monetary Value Score in the range [3-5] & [2-3] respectively.
+- Recent Customers : Unsegmented customers with Recency score and Frequency + Monetary Value Score in the range [4-5] & [0-2] respectively.
+- Promising : Unsegmented customers with Recency score and Frequency + Monetary Value Score in the range [3-4] & [0-2] respectively.
+- Need Attention : Unsegmented customers with Recency score and Frequency + Monetary Value Score in the range [2-3] & [2-3] respectively.
+- About to sleep : Unsegmented customers with Recency score and Frequency + Monetary Value Score in the range [2-3] & [0-2] respectively.
+- At Risk : Unsegmented customers with Recency score and Frequency + Monetary Value Score in the range [0-2] & [2-3] respectively.
+- Can't Lose Them : Unsegmented customers with Recency score and Frequency + Monetary Value Score in the range [0-1] & [4-5] respectively.
+- Hibernating : Unsegmented customers with Recency score and Frequency + Monetary Value Score in the range [0-2] & [0-2] respectively.
+
+## Rules for Managerial Segmentation
+
+- Inactive : Customers whose last transaction with us was more than 3 years ago.
+- Cold : Unsegmented customers whose last transaction with us was more than 2 years ago.
+- Warm : Unsegmented customers whose last transaction with us was more than 1 year ago.
+- Active : Customers whose last transaction with us was less than 1 year ago.
+- Active High Value : Active customers whose average sales value per transaction is more than 500 Euros.
+- Active Low Value : Active customers whose average sales value per transaction is less than 500 Euros.
+- New Active : Active customers whose first purchase with us was less than 1 years ago.
+- Warm High Value : Warm customers whose average sales value per transaction is more than 500 Euros.
+- Warm Low Value : Warm customers whose average sales value per transaction is less than 500 Euros.
+- New Warm : Warm customers whose first purchase with us was less than 2 years ago.
